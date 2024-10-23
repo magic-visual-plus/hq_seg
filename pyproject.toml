@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hq_seg"
+version = "0.0.1"
+description = "high quality image segmentation"
+authors = [
+    { name = "Xiaochuan Zou", email = "zouxiaochuan@163.com" }
+]
+license = { text = "MIT" }
+dependencies = [
+    "numpy",
+    "scipy",
+    "opencv-python",
+]
+requires-python = ">=3.6"
+
+[tool.setuptools]
+packages = ["hq_seg"]
+
+[tool.setuptools.package-dir]
+ai_guide = "hq_seg"
