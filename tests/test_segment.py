@@ -9,7 +9,7 @@ class TestSegment(unittest.TestCase):
     def test_segment(self):
         img_path = os.path.join('data', 'test.bmp')
 
-        predictor = Predictor(os.path.join('data', 'sam_vit_h_4b8939.pth'))
+        predictor = Predictor(os.path.join('data', 'sam_model_vit_b.pth'))
         img = cv2.imread(img_path)
         mask = predictor.predict(img)
 

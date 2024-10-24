@@ -8,7 +8,7 @@ import numpy as np
 class Predictor(object):
 
     def __init__(self, model_file, x_range=(0, -1), y_step_size=3072, foreground_x_range=(280, 340)):
-        sam = sam_model_registry["vit_h"](checkpoint=model_file)
+        sam = sam_model_registry["vit_b"](checkpoint=model_file)
         self.sam_predictor = SamPredictor(sam)
         if torch.cuda.is_available():
             self.sam_predictor.model.to('cuda:0')
