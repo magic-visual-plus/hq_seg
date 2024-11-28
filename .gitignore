@@ -1,3 +1,5 @@
 tests/data
 __pycache__
 .DS_Store
+hq_seg.egg-info
+hq_seg/scripts/output
