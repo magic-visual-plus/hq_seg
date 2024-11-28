@@ -11,7 +11,7 @@ def draw_mask(img, mask):
     mask_img[mask_not] = img[mask_not]
     # cv2.copyTo(img, np.logical_not(mask), mask_img)
     
-    img_ = cv2.addWeighted(img, 0.7, mask_img, 0.3, 0)
+    img_ = cv2.addWeighted(img, 0.7, mask_img, 0.6, 0)
     
     return img_
 

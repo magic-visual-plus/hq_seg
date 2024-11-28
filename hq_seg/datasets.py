@@ -6,6 +6,15 @@ import cv2
 from tqdm import tqdm
 
 
+def get_default_transforms(image_size=1024):
+    return v2.Compose([
+        v2.ToImage(),
+        v2.Resize((image_size, image_size)),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+
 class ImageSegmentationDataset(torch.utils.data.Dataset):
     def __init__(self, image_path, num_classes=None, image_size=1024):
         self.image_path = image_path
@@ -34,7 +43,7 @@ class ImageSegmentationDataset(torch.utils.data.Dataset):
                 basename = os.path.splitext(filename)[0]
                 mask_name = basename + '_mask.png'
                 mask = cv2.imread(os.path.join(image_path, mask_name), cv2.IMREAD_GRAYSCALE)
-                print(mask.max())
+                # print(mask.max())
                 if self.num_classes is None:
                     self.num_classes = mask.max() + 1
                 else:
@@ -43,11 +52,7 @@ class ImageSegmentationDataset(torch.utils.data.Dataset):
                 pass
             pass
 
-        self.transforms = v2.Compose([
-            v2.ToImage(),
-            v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            ])
+        self.transforms = get_default_transforms(image_size)
         pass
 
     def __len__(self):
@@ -67,4 +72,5 @@ class ImageSegmentationDataset(torch.utils.data.Dataset):
         img = self.transforms(img)
 
         return img, mask
+
     pass

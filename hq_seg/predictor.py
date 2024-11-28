@@ -1,57 +1,63 @@
 
 import cv2
-from segment_anything import SamPredictor, sam_model_registry
 import torch
 import numpy as np
+from .models import image_segmenter
+from . import datasets
 
 
 class Predictor(object):
 
-    def __init__(self, model_file, x_range=(0, -1), y_step_size=3072, foreground_x_range=(280, 340)):
-        sam = sam_model_registry["vit_b"](checkpoint=model_file)
-        self.sam_predictor = SamPredictor(sam)
+    def __init__(self, model_file, x_range=(0, -1), y_step_size=1024):
+        model_data = torch.load(model_file, map_location='cpu')
+        self.model = image_segmenter.ImageSegmenter(model_data['num_classes'])
+        self.model.load_state_dict(model_data['state_dict'])
+        self.model.eval()
+        
         if torch.cuda.is_available():
-            self.sam_predictor.model.to('cuda:0')
+            self.model.to('cuda:0')
             pass
         
         self.x_range = x_range
         self.y_step_size = y_step_size
-        self.foreground_x_range = foreground_x_range
+        self.transforms = datasets.get_default_transforms(image_size=1024)
         pass
 
     def predict(self, img):
         # params: img: np.array, shape=(h, w, 3), order='BGR'
+        # return: mask: np.array, shape=(h, w), dtype=np.uint8
 
         masks = []
         for subimg in self.split_image(img, self.x_range, self.y_step_size):
+            original_h = subimg.shape[0]
+            original_w = subimg.shape[1]
+
             subimg = self.preprocess(subimg)
-            x_range = self.foreground_x_range
-            box = np.asarray([x_range[0], 0, x_range[1], subimg.shape[0]])
-            # print(subimg.shape)
-            # cv2.imshow(
-            #     'subimg',
-            #     cv2.rectangle(subimg, (box[0], box[1]), (box[2], box[3]), (0, 255, 0), 10))
-            # cv2.waitKey(0)
-            self.sam_predictor.set_image(subimg, image_format='BGR')
-            mask, _, _ = self.sam_predictor.predict(box=box)
-            mask = mask.astype('int8')
-            mask = np.sum(mask, axis=0)
-            mask = mask >= 2
+            
+            pixel_scores = self.model(subimg)
+            pixel_scores = pixel_scores.squeeze(0)
+            # resize to original size
+
+            pred_mask = torch.argmax(pixel_scores, dim=0)
+
+            pred_mask = pred_mask.cpu().numpy()
+            mask = np.zeros((subimg.shape[2], subimg.shape[3]), dtype=np.uint8)
+            mask[pred_mask == 1] = 0
+            mask[pred_mask == 2] = 1
+            mask = cv2.resize(mask, (original_w, original_h), interpolation=cv2.INTER_NEAREST)
+
             masks.append(mask)
-            print(mask.shape)
             pass
 
         mask = np.concatenate(masks, axis=0)
-        # print('last shape', mask.shape)
         return mask
 
     def preprocess(self, img):
-        img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        img_gray = cv2.GaussianBlur(img_gray, (9, 9), 1.0)
-        mask = img_gray > 160
-        img[mask] = 255
-        # img[:, :x_range_except[0]] = 255
-        # img[:, x_range_except[1]:] = 255
+        img = self.transforms(img)
+        img = img.unsqueeze(0)
+        if torch.cuda.is_available():
+            img = img.to('cuda:0')
+            pass
         return img
 
     def split_image(self, img, x_range, y_step_size):
