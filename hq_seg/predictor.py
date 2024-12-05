@@ -23,7 +23,7 @@ class Predictor(object):
         self.transforms = datasets.get_default_transforms(image_size=1024)
         pass
 
-    def predict(self, img):
+    def predict(self, img, threshold=0.1):
         # params: img: np.array, shape=(h, w, 3), order='BGR'
         # return: mask: np.array, shape=(h, w), dtype=np.uint8
 
@@ -40,10 +40,16 @@ class Predictor(object):
 
             pred_mask = torch.argmax(pixel_scores, dim=0)
 
+            pixel_proba = torch.nn.functional.softmax(pixel_scores, dim=0)
+            mask_proba = pixel_proba > threshold
+            mask_proba = mask_proba.any(dim=0)
+            mask_proba = mask_proba.cpu().numpy()
+
             pred_mask = pred_mask.cpu().numpy()
             mask = np.zeros((subimg.shape[2], subimg.shape[3]), dtype=np.uint8)
             mask[pred_mask == 1] = 0
             mask[pred_mask == 2] = 1
+            mask[np.logical_not(mask_proba)] = 0
             mask = cv2.resize(mask, (original_w, original_h), interpolation=cv2.INTER_NEAREST)
 
             masks.append(mask)
