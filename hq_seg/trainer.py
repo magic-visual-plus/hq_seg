@@ -6,6 +6,7 @@ import torch
 import loguru
 import numpy as np
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 from tqdm import tqdm
 
 logger = loguru.logger
@@ -30,28 +31,45 @@ def run_train(
 
     print(f'Number of classes: {dataset_train.num_classes}')
     model = image_segmenter.ImageSegmenter(dataset_train.num_classes)
-    dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=2, shuffle=True, num_workers=0)
-    dataloader_val = torch.utils.data.DataLoader(dataset_val, batch_size=2, shuffle=False, num_workers=0)
+    # model = image_segmenter.ImageSegmenter2(
+    #     dataset_train.num_classes,
+    #     encoder_size=64, hidden_size=512, decoder_size=64,
+    #     kernel_size=8, stride=8,
+    #     num_layers_encoder=4, num_layers_hidden=4, num_layers_decoder=4
+    # )
+    dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=4, shuffle=True, num_workers=0)
+    dataloader_val = torch.utils.data.DataLoader(dataset_val, batch_size=4, shuffle=False, num_workers=0)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=40, gamma=0.5)
 
     model.to(device)
     model.train()
-    for i_epoch in range(num_epoches):
+    warmup_epochs = 5
+    for i_epoch in range(num_epoches + warmup_epochs):
         # Training process
         train_losses = []
         train_ious = []
+
+        if i_epoch < warmup_epochs:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = max(1e-4 * (i_epoch + 1) / warmup_epochs, 1e-6)
+                pass
+            pass
+
         for i_batch, batch_data in enumerate(dataloader_train):
             img, mask = batch_data
             img = img.to(device)
             mask = mask.to(device)
 
+            img = TF.resize(img, (256, 256), interpolation=TF.InterpolationMode.BILINEAR)
+            mask_ = TF.resize(mask, (256, 256), interpolation=TF.InterpolationMode.NEAREST)
             # Forward pass
             pixel_scores = model(img)
             # Compute loss
-            loss = model.compute_loss(pixel_scores, mask)
+            loss = model.compute_loss(pixel_scores, mask_)
             # calculate averge iou
+            pixel_scores = F.interpolate(pixel_scores, (mask.shape[1], mask.shape[2]), mode='bilinear', align_corners=False)
             pred_mask = torch.argmax(pixel_scores, dim=1)
             iou = iou_score(pred_mask, mask, 2)
             train_ious.append(iou.item())
@@ -73,10 +91,14 @@ def run_train(
             img = img.to(device)
             mask = mask.to(device)
 
+            img = TF.resize(img, (256, 256), interpolation=TF.InterpolationMode.BILINEAR)
+            mask_ = TF.resize(mask, (256, 256), interpolation=TF.InterpolationMode.NEAREST)
             # Forward pass
             pixel_scores = model(img)
             # Compute loss
-            loss = model.compute_loss(pixel_scores, mask)
+            loss = model.compute_loss(pixel_scores, mask_)
+
+            pixel_scores = F.interpolate(pixel_scores, (mask.shape[1], mask.shape[2]), mode='bilinear', align_corners=False)
             pred_mask = torch.argmax(pixel_scores, dim=1)
             iou = iou_score(pred_mask, mask, 2)
             val_ious.append(iou.item())
@@ -85,11 +107,13 @@ def run_train(
             pass
 
         logger.info(
-            f'Epoch {i_epoch}, train loss: {np.mean(train_losses)}, validation loss: {np.mean(val_losses)}, lr: {scheduler.get_last_lr()[0]}'
+            f'Epoch {i_epoch}, train loss: {np.mean(train_losses)}, validation loss: {np.mean(val_losses)}, lr: {optimizer.param_groups[0]["lr"]}'
             f'train iou: {np.mean(train_ious)}, validation iou: {np.mean(val_ious)}'
         )
 
-        scheduler.step()
+        if i_epoch >= warmup_epochs:
+            scheduler.step()
+            pass
         pass
 
     # Save model

@@ -2,6 +2,29 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 from . import simple_transformer
+from torchvision.ops import sigmoid_focal_loss
+from . import cross_transformer
+
+
+class PositionEncoding1DEx(nn.Module):
+    def __init__(self, query_max_size, key_max_size, dim):
+        super(PositionEncoding1DEx, self).__init__()
+        self.dim = dim
+        self.x_emb = nn.Embedding(query_max_size, dim)
+        self.y_emb = nn.Embedding(key_max_size, dim)
+        pass
+
+    def forward(self, query_size, key_size):
+        x = torch.arange(query_size, device=self.x_emb.weight.device)
+        y = torch.arange(key_size, device=self.y_emb.weight.device)
+        x = torch.unsqueeze(x, 1)
+        y = torch.unsqueeze(y, 0)
+        x = torch.tile(x, [1, key_size])
+        y = torch.tile(y, [query_size, 1])
+        x_encoding = self.x_emb(x)
+        y_encoding = self.y_emb(y)
+        return x_encoding + y_encoding
+        pass
 
 
 class PositionEncoding2D(nn.Module):
@@ -66,75 +89,200 @@ class MultiConv2d(nn.Module):
         x2 = self.activation(x2)
         return x2 + x1
 
-class ImageSegmenterDecoderTransformer(nn.Module):
-    def __init__(self, num_classes, decoder_dim, decoder_size):
-        super(ImageSegmenterDecoderTransformer, self).__init__()
-        self.decoder_dim = decoder_dim
-        self.decoder_size = decoder_size
-        self.decoder_embed_layer = nn.Linear(3, decoder_dim)
-        decoder_num_heads = 8
-        decoder_head_size = decoder_dim // decoder_num_heads
+class ImageEncoderTransformer(nn.Module):
+    def __init__(
+            self, kernel_size, stride, num_layers1, hidden_size, output_size, num_layers2):
+        super(ImageEncoderTransformer, self).__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.num_layers1 = num_layers1
+        self.hidden_size = hidden_size
+        self.pixel_embed_layer = nn.Linear(3, hidden_size)
+        self.attention_head_size = hidden_size // 4
+        self.attention_head_size2 = output_size // 8
+        self.encode_layer = simple_transformer.MultiLayerTransformer(
+            num_layers1, hidden_size, attention_head_size=self.attention_head_size,
+            reduction=None, use_structure_matrix=True)
+        self.position_encoder = PositionEncoding2D(kernel_size, self.attention_head_size)
 
-        self.decoder_position_encoding = PositionEncoding2D(self.decoder_size, decoder_head_size)
+        self.output_layer1 = nn.Linear(hidden_size, output_size)
+        self.output_position_encoder = PositionEncoding1DEx(kernel_size**2, output_size, self.attention_head_size2)
+        self.output_layer = cross_transformer.MultiLayerCrossTransformer(
+            num_layers=1, hidden_size=output_size, attention_head_size=self.attention_head_size2,
+            reduction=None, use_structure_matrix=True
+        )
+        # self.output_layer = nn.Linear(self.hidden_size * self.kernel_size**2, output_size)
 
-        self.pad0_position_embedding = nn.Parameter(nn.init.kaiming_uniform_(torch.zeros(1, 1, decoder_head_size)))
-        self.pad1_position_embedding = nn.Parameter(nn.init.kaiming_uniform_(torch.zeros(1, 1, decoder_head_size)))
-
-        self.transformer = simple_transformer.MultiLayerTransformer(
-            2, decoder_dim, decoder_dim*4, decoder_head_size, decoder_num_heads, 0.1, 0.1, None, True)
-        
-        self.classifier = nn.Linear(decoder_dim, num_classes)
+        self.encode_layer2 = simple_transformer.MultiLayerTransformer(
+            num_layers2, output_size, attention_head_size=self.attention_head_size2,
+            reduction=None, use_structure_matrix=True)
+        self.position_encoder2 = PositionEncoding2D(kernel_size**2, self.attention_head_size2)
         pass
 
-    def forward(self, x, patches):
-        # x: [B, encoder_dim]
-        # patches: [B, 3, decoder_size, decoder_size]
+    def forward(self, x):
+        # x: [B, C, H, W]
+        B, C, H, W = x.shape
+        assert H == W
+        L = H * W // self.stride**2
+        x = F.unfold(x, self.kernel_size, stride=self.stride)
+        # x: [B, C*kernel_size**2, H*W//stride**2]
+        x = x.reshape(B, C, self.kernel_size**2, L)
+        x = x.permute(0, 3, 2, 1)
+        # x: [B, L, kernel_size**2, C]
+        x = self.pixel_embed_layer(x)
+        # x: [B, L, kernel_size**2, h]
+        x = x.reshape(-1, self.kernel_size**2, self.hidden_size)
+        pos_code = self.position_encoder(self.kernel_size)
+        # x: [B*L, kernel_size**2, h]
+        x = self.encode_layer(x, structure_matrix=pos_code)
+        # x: [B*L, kernel_size**2, h]
 
-        patches = torch.permute(patches, [0, 2, 3, 1])
-        # patches: [B, decoder_size, decoder_size, 3]
-        patches_x = self.decoder_embed_layer(patches)
-        # patches_x: [B, decoder_size, decoder_size, decoder_dim]
-        patches_x = torch.reshape(patches_x, [patches_x.shape[0], -1, patches_x.shape[-1]])
-        # patches_x: [B, decoder_size2, decoder_dim]
-        num_enc_reshape = x.shape[-1] // self.decoder_dim
-        x = torch.reshape(x, [x.shape[0], num_enc_reshape, self.decoder_dim])
-        # x: [B, num_enc_reshape, decoder_dim]
-        pos_dec = self.decoder_position_encoding(self.decoder_size)
-        # pos_dec: [decoder_size**2, decoder_size**2, decoder_dim]
-        decoder_size2 = self.decoder_size * self.decoder_size
+        x = self.output_layer1(x)
+        # x: [B*L, kernel_size**2, output_size]
+        x_mean = torch.mean(x, dim=1, keepdim=True)
+        # x: [B*L, 1, output_size]
+        
+        pos_code_output = self.output_position_encoder(1, self.kernel_size**2)
+        x = self.output_layer(
+            x_mean, x, structure_matrix=pos_code_output)
+        # x: [B*L, 1, output_size]
+        x = x.reshape(B, L, -1)
+        # x: [B, L, output_size]
 
-        pos_pad0 = torch.tile(self.pad0_position_embedding, [num_enc_reshape, num_enc_reshape, 1])
-        pos_pad1 = torch.tile(self.pad1_position_embedding, [decoder_size2, num_enc_reshape, 1])
+        # x = x.reshape(B, L, -1)
+        # # x: [B, L, kernel_size**2*h]
+        # x = self.output_layer(x)
+        # # x: [B, L, output_size]
+        
+        w = W // self.stride
+        pos_code2 = self.position_encoder2(w)
+        x = self.encode_layer2(x, structure_matrix=pos_code2)
+        # x: [B, L, output_size]
 
-        # pad decoder position encoding
-        pos_pad = torch.cat([pos_pad0, pos_pad1], axis=0)
-        # pos_pad: [num_enc_reshape+decoder_size2, num_enc_reshape, decoder_dim]
+        x = x.reshape(B, w, w, -1)
 
-        pos_dec = torch.cat([pos_pad1.transpose(0, 1), pos_dec], axis=0)
-        # pos_dec: [num_enc_reshape+decoder_size2, decoder_size2, decoder_dim]
+        return x
 
-        pos_dec = torch.cat([pos_pad, pos_dec], axis=1)
-        # pos_dec: [num_enc_reshape+decoder_size2, num_enc_reshape+decoder_size2, decoder_dim]
 
-        x = torch.cat([x, patches_x], axis=1)
-        # x: [B, num_enc_reshape+decoder_size2, decoder_dim]
 
-        x = self.transformer(x, structure_matrix=pos_dec)
-        # x: [B*h*w, num_enc_reshape+decoder_size2, decoder_dim]
+class PixelDecoderTransformer(nn.Module):
+    def __init__(self, num_classes, input_size, kernel_size, stride, num_layers, hidden_size):
+        super(PixelDecoderTransformer, self).__init__()
+        self.kernel_size = kernel_size
+        self.input_size = input_size
+        self.stride = stride
+        self.hidden_size = hidden_size
+        self.attention_head_size = hidden_size // 4
+        self.attention_head_size2 = input_size // 8
 
-        x = x[:, num_enc_reshape:, :]
-        # x: [B, decoder_size2, decoder_dim]
+        self.position_encoder = PositionEncoding2D(self.kernel_size, self.attention_head_size)
 
+        self.transformer = simple_transformer.MultiLayerTransformer(
+            num_layers, hidden_size, attention_head_size=self.attention_head_size, reduction=None, use_structure_matrix=True)
+        
+        self.linear_map = nn.Linear(input_size, hidden_size)
+        self.cross_map = cross_transformer.MultiLayerCrossTransformer(
+            num_layers=1, hidden_size=input_size, attention_head_size=self.attention_head_size2,
+            reduction=None, use_structure_matrix=True)
+        self.position_encoder_map = PositionEncoding1DEx(kernel_size**2, 1, self.attention_head_size2)
+
+        self.pixel_embed_layer = nn.Linear(3, input_size)
+        
+        self.classifier = nn.Linear(hidden_size, num_classes)
+        pass
+
+    def forward(self, embed, x):
+        # embed: [B, w, w, input_size]
+        # x: [B, C, H, W]
+        H = x.shape[2]
+        W = x.shape[3]
+        # embed = embed.permute(0, 3, 1, 2)
+        # # embed: [B, input_size, w, w]
+        # embed = self.inv_conv(embed)
+        # # embed: [B, hidden_size, H, W]
+        # embed = embed.permute(0, 2, 3, 1)
+
+        B = embed.shape[0]
+        embed = embed.reshape((-1, 1, self.input_size))
+        # embed: [B*w*w, 1, hidden_size]
+        pos_code_map = self.position_encoder_map(self.kernel_size**2, 1)
+        
+        x = x.permute(0, 2, 3, 1)
+        # x: [B, H, W, C]
+        x = self.pixel_embed_layer(x)
+        L = x.shape[1] * x.shape[2] // self.stride**2
+
+        # x: [B, H, W, input_size]
+        x = F.unfold(x, self.kernel_size, stride=self.stride)
+        # x: [B, input_size*kernel_size**2, L]
+        x = x.reshape((B, self.input_size, self.kernel_size**2, -1))
+        # x: [B, hidden_size, kernel_size**2, L]
+        x = x.permute(0, 3, 2, 1)
+        # x: [B, L, kernel_size**2, hidden_size]
+        x = x.reshape((-1, self.kernel_size**2, self.input_size))
+        # x: [B*L, kernel_size**2, hidden_size]
+
+        x = self.cross_map(x, embed, structure_matrix=pos_code_map)
+        # x: [B*L, kernel_size**2, hidden_size]
+
+        x = self.linear_map(x)
+        # x = x + embed
+        # B = x.shape[0]
+        # x = x.permute(0, 3, 1, 2)
+        # # x: [B, hidden_size, H, W]
+        # x = F.unfold(x, self.kernel_size, stride=self.stride)
+        # # x: [B, hidden_size*kernel_size**2, L]
+        # x = x.reshape((B, self.hidden_size, self.kernel_size**2, L))
+        # x = x.permute(0, 3, 2, 1)
+        # # x: [B, L, kernel_size**2, hidden_size]
+        # x = x.reshape((-1, self.kernel_size**2, self.hidden_size))
+        # x: [B*L, kernel_size**2, hidden_size]
+        pos_code = self.position_encoder(self.kernel_size)
+        x = self.transformer(x, structure_matrix=pos_code)
+        # x: [B*L, kernel_size**2, hidden_size]
         x = self.classifier(x)
-        # x: [B, decoder_size2, num_classes]
+        # x: [B*L, kernel_size**2, num_classes]
+        x = x.reshape(B, L, self.kernel_size**2, -1)
+        # x: [B, L, kernel_size**2, num_classes]
+        x = x.permute(0, 3, 2, 1)
+        # x: [B, num_classes, kernel_size**2, L]
+        x = x.reshape(B, -1, L)
+        # x: [B, num_classes*kernel_size**2, L]
+        x = F.fold(x, [H, W], self.kernel_size, stride=self.stride)
 
-        x = torch.reshape(x, [x.shape[0], self.decoder_size, self.decoder_size, x.shape[-1]])
-        # x: [B, decoder_size, decoder_size, num_classes]
-
-        x = torch.permute(x, [0, 3, 1, 2])
         return x
         pass
 
+
+class ImageSegmenter2(nn.Module):
+    def __init__(self, num_classes, encoder_size, hidden_size, decoder_size, kernel_size, stride, num_layers_encoder, num_layers_hidden, num_layers_decoder):
+        super(ImageSegmenter2, self).__init__()
+        self.encoder = ImageEncoderTransformer(
+            kernel_size, stride, num_layers_encoder, encoder_size, hidden_size, num_layers_hidden)
+        self.decoder = PixelDecoderTransformer(
+            num_classes, hidden_size, kernel_size, stride, num_layers_decoder, decoder_size)
+        pass
+
+    def forward(self, x):
+        emb = self.encoder(x)
+        x = self.decoder(emb, x)
+        return x
+        pass
+
+    def compute_loss(self, pixel_scores, mask):
+        # pixel_scores: [B, num_classes, H, W]
+        # mask: [B, H, W]
+        
+        # focal loss
+        proba = F.softmax(pixel_scores, dim=1)
+        # proba: [B, num_classes, H, W
+        loss = F.cross_entropy(pixel_scores, mask, reduction='none')
+        # loss: [B, H, W]
+        proba = torch.gather(proba, 1, torch.unsqueeze(mask, 1)).detach()
+
+        loss = torch.where(proba > 0.9, 0, loss)
+        loss = torch.mean(loss)
+        return loss
 
 class ImageSegmenter(nn.Module):
     @classmethod
@@ -151,8 +299,8 @@ class ImageSegmenter(nn.Module):
         self.decoder_size = decoder_size
         self.decoder_dim = decoder_dim
         # self.embed_layer = nn.Conv2d(3, encoder_dim, 32, 32)
-        self.conv1 = nn.Conv2d(3, 128, kernel_size=4, stride=4, padding=0)
-        self.conv2 = nn.Conv2d(128, 256, kernel_size=4, stride=4, padding=0)
+        self.conv1 = nn.Conv2d(3, 128, kernel_size=2, stride=2, padding=0)
+        self.conv2 = nn.Conv2d(128, 256, kernel_size=2, stride=2, padding=0)
         self.conv3 = nn.Conv2d(256, 512, kernel_size=2, stride=2, padding=0)
         self.bn1 = nn.BatchNorm2d(128)
         self.bn2 = nn.BatchNorm2d(256)
@@ -162,14 +310,14 @@ class ImageSegmenter(nn.Module):
         encoder_num_heads = 16
         encoder_head_size = encoder_dim // encoder_num_heads
         self.encoder = simple_transformer.MultiLayerTransformer(
-            4, encoder_dim, encoder_dim*4, encoder_head_size, encoder_num_heads, 0.1, 0.1, None, True)
+            6, encoder_dim, encoder_dim*4, encoder_head_size, encoder_num_heads, 0.1, 0.1, None, True)
         # self.decoder = ImageSegmenterDecoderTransformer(num_classes, decoder_dim, decoder_size)
         self.encoder_position_encoding = PositionEncoding2D(self.encoder_size, encoder_head_size)
 
         self.classifer_linear = nn.Linear(encoder_dim, decoder_size*decoder_size*num_classes)
         self.inv_conv1 = nn.ConvTranspose2d(1024, 256, kernel_size=2, stride=2, padding=0)
-        self.inv_conv2 = nn.ConvTranspose2d(512, 128, kernel_size=4, stride=4, padding=0)
-        self.inv_conv3 = nn.ConvTranspose2d(256, 64, kernel_size=4, stride=4, padding=0)
+        self.inv_conv2 = nn.ConvTranspose2d(512, 128, kernel_size=2, stride=2, padding=0)
+        self.inv_conv3 = nn.ConvTranspose2d(256, 64, kernel_size=2, stride=2, padding=0)
         self.inv_bn1 = nn.BatchNorm2d(256)
         self.inv_bn2 = nn.BatchNorm2d(128)
         self.inv_multi_conv3 = MultiConv2d(64, 64, 3, 1, 1)
@@ -283,6 +431,15 @@ class ImageSegmenter(nn.Module):
     def compute_loss(self, pixel_scores, mask):
         # pixel_scores: [B, num_classes, H, W]
         # mask: [B, H, W]
-        loss = F.cross_entropy(pixel_scores, mask)
+        
+        # focal loss
+        proba = F.softmax(pixel_scores, dim=1)
+        # proba: [B, num_classes, H, W
+        loss = F.cross_entropy(pixel_scores, mask, reduction='none')
+        # loss: [B, H, W]
+        proba = torch.gather(proba, 1, torch.unsqueeze(mask, 1)).detach()
+
+        loss = torch.where(proba > 0.9, 0, loss)
+        loss = torch.mean(loss)
         return loss
     pass

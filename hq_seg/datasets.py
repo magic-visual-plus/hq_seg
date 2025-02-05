@@ -29,14 +29,20 @@ class RandomCrop:
             pass
         else:
             shift_left = random.randint(0, 100)
-            shift_top = random.randint(0, 300)
             shift_right = random.randint(0, 100)
-            shift_bottom = random.randint(0, 300)
 
             h = img.shape[0]
             w = img.shape[1]
-            img = img[shift_top:h-shift_bottom, shift_left:w-shift_right]
-            mask = mask[shift_top:h-shift_bottom, shift_left:w-shift_right]
+
+            img = img[:, shift_left:w-shift_right]
+            mask = mask[:, shift_left:w-shift_right]
+            if h > 900:
+                shift_top = random.randint(0, 300)
+                shift_bottom = random.randint(0, 300)
+                img = img[shift_top:h-shift_bottom, :]
+                mask = mask[shift_top:h-shift_bottom, :]
+                pass
+            
             img = cv2.resize(img, (w, h), interpolation=cv2.INTER_LINEAR_EXACT)
             mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST_EXACT)
             pass
