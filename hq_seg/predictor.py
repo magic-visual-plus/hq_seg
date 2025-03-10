@@ -4,11 +4,12 @@ import torch
 import numpy as np
 from .models import image_segmenter
 from . import datasets
+from typing import Tuple
 
 
 class Predictor(object):
 
-    def __init__(self, model_file, x_range=(0, -1), y_step_size=1024):
+    def __init__(self, model_file, step_size: Tuple[int, int] = (-1, -1)):
         model_data = torch.load(model_file, map_location='cpu')
         self.model = image_segmenter.ImageSegmenter(model_data['num_classes'])
         # self.model = image_segmenter.ImageSegmenter2(
@@ -24,8 +25,7 @@ class Predictor(object):
             self.model.to('cuda:0')
             pass
         
-        self.x_range = x_range
-        self.y_step_size = y_step_size
+        self.step_size = step_size
         self.transforms = datasets.get_default_transforms(image_size=256)
         pass
 
@@ -35,14 +35,23 @@ class Predictor(object):
 
         masks = []
         subimgs = []
-        original_shapes = []
-        for subimg in self.split_image(img, self.x_range, self.y_step_size):
-            original_h = subimg.shape[0]
-            original_w = subimg.shape[1]
+        x_step, y_step = self.step_size
 
-            subimg = self.preprocess(subimg)
-            subimgs.append(subimg)
-            original_shapes.append((original_h, original_w))
+        if x_step == -1:
+            x_step = img.shape[1]
+            pass
+
+        if y_step == -1:
+            y_step = img.shape[0]
+            pass
+
+        for y in range(0, img.shape[0], y_step):
+            for x in range(0, img.shape[1], x_step):
+                subimg = img[y:y+y_step, x:x+x_step]
+
+                subimg = self.preprocess(subimg)
+                subimgs.append(subimg)
+                pass
             pass
 
         subimgs = torch.cat(subimgs, dim=0)
@@ -50,30 +59,39 @@ class Predictor(object):
             pixel_scores = self.model(subimgs)
             pass
 
-        for (original_h, original_w), pixel_score in zip(original_shapes, pixel_scores):
-            pixel_score = pixel_score.unsqueeze(0)
-            pixel_score = torch.nn.functional.interpolate(pixel_score, (original_h, original_w), mode='bilinear', align_corners=False)
-            pixel_score = pixel_score.squeeze(0)
-            # resize to original size
+        idx = 0
+        y_masks = []
+        for y in range(0, img.shape[0], y_step):
+            x_masks = []
+            for x in range(0, img.shape[1], x_step):
+                pixel_score = pixel_scores[idx]
+                idx += 1
 
-            pred_mask = torch.argmax(pixel_score, dim=0)
+                original_h = min(y_step, img.shape[0] - y)
+                original_w = min(x_step, img.shape[1] - x)
 
-            pixel_proba = torch.nn.functional.softmax(pixel_score, dim=0)
-            mask_proba = pixel_proba > threshold
-            mask_proba = mask_proba.any(dim=0)
-            mask_proba = mask_proba.cpu().numpy()
+                pixel_score = pixel_score.unsqueeze(0).unsqueeze(0)
+                pixel_score = torch.nn.functional.interpolate(pixel_score, (original_h, original_w), mode='bilinear', align_corners=False)
+                pixel_score = pixel_score.squeeze(0).squeeze(0)
+                # resize to original size
 
-            pred_mask = pred_mask.cpu().numpy()
-            mask = np.zeros((original_h, original_w), dtype=np.uint8)
-            mask[pred_mask == 1] = 0
-            mask[pred_mask == 2] = 1
-            mask[np.logical_not(mask_proba)] = 0
-            mask = cv2.resize(mask, (original_w, original_h), interpolation=cv2.INTER_NEAREST)
+                pred_mask = (pixel_score > 0).float()
+                pixel_proba = torch.nn.functional.sigmoid(pixel_score)
+                mask_proba = pixel_proba > threshold
+                mask_proba = mask_proba.cpu().numpy()
 
-            masks.append(mask)
+                pred_mask = pred_mask.cpu().numpy()
+                mask = pred_mask.astype(np.uint8)
+                mask[np.logical_not(mask_proba)] = 0
+
+                mask = cv2.resize(mask, (original_w, original_h), interpolation=cv2.INTER_LINEAR_EXACT)
+                x_masks.append(mask)
+                pass
+            y_mask = np.concatenate(x_masks, axis=1)
+            y_masks.append(y_mask)
             pass
 
-        mask = np.concatenate(masks, axis=0)
+        mask = np.concatenate(y_masks, axis=0)
         return mask
 
     def preprocess(self, img):
@@ -83,23 +101,5 @@ class Predictor(object):
             img = img.to('cuda:0')
             pass
         return img
-
-    def split_image(self, img, x_range, y_step_size):
-        start = 0
-        idx = 0
-        
-        while start < img.shape[0]:
-            end = min(start+y_step_size, img.shape[0])
-            
-            if x_range[1] == -1:
-                subimg = img[start: end, x_range[0]:]
-            else:
-                subimg = img[start: end, x_range[0]: x_range[1]]
-                pass
-
-            yield subimg
-            start = end
-            idx += 1
-        pass
 
     pass
