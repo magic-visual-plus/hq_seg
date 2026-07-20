@@ -10,7 +10,7 @@ from typing import Tuple
 class Predictor(object):
 
     def __init__(self, model_file, step_size: Tuple[int, int] = (-1, -1)):
-        model_data = torch.load(model_file, map_location='cpu')
+        model_data = torch.load(model_file, map_location='cpu', weights_only=False)
         self.model = image_segmenter.ImageSegmenter(model_data['num_classes'])
         # self.model = image_segmenter.ImageSegmenter2(
         #     model_data['num_classes'],

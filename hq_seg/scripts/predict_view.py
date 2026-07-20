@@ -44,8 +44,8 @@ def draw_width_min_max(mask, img):
     return img
 
 if __name__ == '__main__':
-    input_path = sys.argv[1]
-    model_path = sys.argv[2]
+    input_path = sys.argv[2]
+    model_path = sys.argv[1]
     output_path = sys.argv[3]
 
     seg_predictor = predictor.Predictor(model_path)
